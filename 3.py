@@ -49,11 +49,7 @@ def prepare(sentence):
     return inputs, positions
 
 
-def search_candidates(sentence, target):
-    target_ids = tokenizer.encode(target, add_special_tokens=False)
-    if len(target_ids) != 2:
-        raise ValueError(f"Слово {target!r} не состоит из двух токенов в выбранной модели.")
-
+def search_candidates(sentence):
     inputs, (first_pos, second_pos) = prepare(sentence)
 
     with torch.inference_mode():
@@ -64,12 +60,8 @@ def search_candidates(sentence, target):
     start_scores = first_log_probs[available_first]
     best_start_indices = torch.topk(start_scores, min(FIRST_BEAM, len(FIRST_IDS))).indices
     starters = available_first[best_start_indices].tolist()
-    if target_ids[0] not in starters:
-        starters.append(target_ids[0])
 
     candidates = {}
-    target_second_rank = None
-
     for offset in range(0, len(starters), BATCH_SIZE):
         batch = starters[offset:offset + BATCH_SIZE]
         batch_ids = inputs["input_ids"].repeat(len(batch), 1)
@@ -85,11 +77,6 @@ def search_candidates(sentence, target):
 
         for j, first_id in enumerate(batch):
             end_ids = [ENDING_IDS[k] for k in top_indices[j].tolist()]
-            if first_id == target_ids[0]:
-                target_second_rank = int((log_probs[j] > log_probs[j, target_ids[1]]).sum().item()) + 1
-                if target_ids[1] not in end_ids:
-                    end_ids.append(target_ids[1])
-
             for end_id in end_ids:
                 word = tokenizer.convert_tokens_to_string(
                     tokenizer.convert_ids_to_tokens([first_id, end_id])
@@ -101,42 +88,30 @@ def search_candidates(sentence, target):
                 score = first_log_probs[first_id].item() + log_probs[j, end_id].item()
                 candidates[word] = max(candidates.get(word, float("-inf")), score)
 
-    target_first_rank = int((first_log_probs > first_log_probs[target_ids[0]]).sum().item()) + 1
     ranking = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
-    target_rank = next((rank for rank, (word, _) in enumerate(ranking, 1) if word == target), None)
-    return ranking, target_rank, target_first_rank, target_second_rank
+    return ranking
 
 
 def main():
-    print(f"Модель: {MODEL_NAME} | Устройство: {DEVICE}")
-    print(f"Поиск: {FIRST_BEAM} первых токенов + обязательная проверка целевого")
+    print(f"Модель: {MODEL_NAME}")
 
     for target, sentence in SENTENCES.items():
-        print("\n" + "=" * 70)
-        print(f"Слово: {target}")
+        ranking = search_candidates(sentence)
+        rank = next((i for i, (word, _) in enumerate(ranking, 1) if word == target), None)
+
+        print(f"\nСлово: {target}")
         print(f"Предложение: {sentence}")
-        print(f"Подстановка: {sentence.replace('[MASK]', target)}")
-        print(f"Токены: {tokenizer.tokenize(target)}")
+        print("Топ-10 двухтокенных кандидатов (ограниченный поиск):")
 
-        ranking, rank, first_rank, second_rank = search_candidates(sentence, target)
-
-        print("\nТОП-10 СРЕДИ СГЕНЕРИРОВАННЫХ ДВУХТОКЕННЫХ КАНДИДАТОВ:")
         for position, (word, score) in enumerate(ranking[:TOP_N], 1):
-            marker = " <-- ЦЕЛЕВОЕ" if word == target else ""
-            print(f"{position:2}. {word:24} {score:10.4f}{marker}")
+            mark = " *" if word == target else ""
+            print(f"{position:2}. {word:22} {score:.4f}{mark}")
 
-        print(f"\nРанг первого токена среди всех токенов: {first_rank}")
-        print(f"Ранг второго токена при известном первом: {second_rank}")
-        if rank is not None:
-            score = ranking[rank - 1][1]
-            print(f"Место целевого слова среди рассмотренных кандидатов: {rank}")
-            print(f"Оценка целевого слова: {score:.4f}")
-            print("В топ-10 рассмотренных кандидатов:", "ДА" if rank <= TOP_N else "НЕТ")
+        if rank is None:
+            print("Целевое слово не найдено среди кандидатов.")
         else:
-            print("Целевое слово не удалось собрать из токенов.")
-
-    print("\nПримечание: это ограниченный двухтокенный поиск, а не точный топ-10")
-    print("всех русских слов и не исходный метод с одной маской.")
+            print(f"Место слова «{target}»: {rank}")
+            print(f"В топ-10 кандидатов: {'да' if rank <= TOP_N else 'нет'}")
 
 
 if __name__ == "__main__":
